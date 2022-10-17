@@ -1,59 +1,116 @@
-/* ************************************************************************** */
-/*                                                                            */
-/*                                                        :::      ::::::::   */
-/*   mini_serv.c                                        :+:      :+:    :+:   */
-/*                                                    +:+ +:+         +:+     */
-/*   By: ablondel <ablondel@student.42.fr>          +#+  +:+       +#+        */
-/*                                                +#+#+#+#+#+   +#+           */
-/*   Created: 2022/10/15 16:49:05 by ablondel          #+#    #+#             */
-/*   Updated: 2022/10/17 15:21:20 by ablondel         ###   ########.fr       */
-/*                                                                            */
-/* ************************************************************************** */
-
 #include <string.h>
 #include <unistd.h>
-#include <netdb.h>
-#include <sys/socket.h>
-#include <sys/select.h>
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-void	error(int where)
+int clients_id, fd_max = 0;
+int index_fds[65536];
+char *msg[65536];
+char rbuf[1025], wbuf[1025];
+fd_set rfds, wfds, cfds;
+
+int extract_message(char **buf, char **msg)
+{
+	char    *newbuf;
+	int i;
+
+	*msg = 0;
+	if (!*buf)
+		return (0);
+	i = 0;
+	while ((*buf)[i])
+	{
+		if ((*buf)[i] == '\n')
+		{
+			newbuf = calloc(1, sizeof(*newbuf) * (strlen(*buf + i + 1) + 1));
+			if (!newbuf)
+				return (-1);
+			strcpy(newbuf, *buf + i + 1);
+			*msg = *buf;
+			(*msg)[i + 1] = 0;
+			*buf = newbuf;
+			return (1);
+		}
+		i++;
+	}
+	return (0);
+}
+
+char *str_join(char *buf, char *add)
+{
+	char    *newbuf;
+	int     len;
+
+	if (buf == 0)
+		len = 0;
+	else
+		len = strlen(buf);
+	newbuf = malloc(sizeof(*newbuf) * (len + strlen(add) + 1));
+	if (!newbuf)
+		return (0);
+	newbuf[0] = 0;
+	if (buf != 0)
+		strcat(newbuf, buf);
+	free(buf);
+	strcat(newbuf, add);
+	return (newbuf);
+}
+
+void	fatal(void)
 {
 	write(2, "Fatal error\n", 12);
-	printf("{%d}\n", where);
 	exit(1);
 }
 
-//void	setup_s_addr()
-	//assign IP, PORT 
-	//servaddr.sin_family = AF_INET; 
-	//servaddr.sin_addr.s_addr = htonl(2130706433); //127.0.0.1
-	//servaddr.sin_port = htons(atoi(av[1])); 
+void	notify(int emitter, char *msg)
+{
+	for (int i = 0; i <= fd_max; i++)
+		if (FD_ISSET(i, &wfds) && i != emitter)
+			send(i, msg, strlen(msg), 0);
+}
 
-//void	setup_and_listen()
-	//socket(); || error
-	//setup_s_addr();
-	//bind(); || error();
-	//listen(); || error();
-	
-//void	get_message()
-	//recv()
+void	deliver(int fd)
+{
+	char *s;
+	while (extract_message(&msg[fd], &s))
+	{
+		sprintf(wbuf, "client %d: ", index_fds[fd]);
+		notify(fd, wbuf);
+		notify(fd, s);
+		free(s);
+		s = NULL;
+	}
+}
 
-//void	notify_all()
-	//send();
+void	add_client(int fd)
+{
+	fd_max = fd > fd_max ? fd : fd_max;
+	index_fds[fd] = clients_id++;
+	msg[fd] = NULL;
+	FD_SET(fd, &cfds);
+	sprintf(wbuf, "server: client %d just arrived\n", index_fds[fd]);
+	notify(fd, wbuf);
+}
 
-//void	disconnect()
-	//close();
+void	remove_client(int fd)
+{
+	sprintf(wbuf, "server: client %d just left\n", index_fds[fd]);
+	notify(fd, wbuf);
+	free(msg[fd]);
+	msg[fd] = NULL;
+	FD_CLR(fd, &cfds);
+	close(fd);
+}
 
-//void	run_server()
-	//while (1)
-		//select fd from the fd_set
-		//accept client until max fd
-		//get_message(from current client);
-		//notify_all(other clients with current client message);
-		//disconnect(close current client);
+int		create_socket(void)
+{
+	fd_max = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd_max < 0)
+		fatal();
+	FD_SET(fd_max, &cfds);
+	return (fd_max);
+}
 
 int main(int ac, char **av)
 {
@@ -62,40 +119,50 @@ int main(int ac, char **av)
 		write(2, "Wrong number of arguments\n", 26);
 		exit(1);
 	}
-	//SERVER////////////////////////////////////////////////////////////////////////////
-	int sockfd, connfd, len;
-	struct sockaddr_in servaddr, cli;
-	fd_set read_set, write_set, client_set;
-
-	// socket creation and verification 
-	sockfd = socket(AF_INET, SOCK_STREAM, 0); 
-	if (sockfd == -1)
-		error(0);
+	int sockfd = create_socket();
+	struct sockaddr_in servaddr; 
 	
-	// assign IP, PORT 
 	bzero(&servaddr, sizeof(servaddr)); 
 	servaddr.sin_family = AF_INET; 
 	servaddr.sin_addr.s_addr = htonl(2130706433); //127.0.0.1
 	servaddr.sin_port = htons(atoi(av[1])); 
-  
-	// Binding newly created socket to given IP and verification 
-	if ((bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) != 0)
-		error(1);
-	
-	//Listenning on sockfd and verification
-	if (listen(sockfd, 10) != 0)
-		error(2);
+	if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)))
+		fatal();
+	if (listen(sockfd, 128))
+		fatal();
 
-	//CLIENT////////////////////////////////////////////////////////////////////////////
-	len = sizeof(cli);
-	connfd = accept(sockfd, (struct sockaddr *)&cli, &len);
-	if (connfd < 0)
-		error(3);
-    else
-        printf("server acccept the client %d...\n", connfd);
-	char buffer[4096];
-	size_t bytes_read = recv(connfd, buffer, 4096, NULL);
-	printf("[%s]\n", buffer);
-	size_t bytes_written = send(1, buffer, 4096, NULL);
+	while (1)
+	{
+		rfds = wfds = cfds;
+		if (select(fd_max + 1, &rfds, &wfds, NULL, NULL) < 0)
+			fatal();
+		for (int fd = 0; fd <= fd_max; fd++)
+		{
+			if (FD_ISSET(fd, &rfds) <= 0)
+				continue ;
+			if (fd == sockfd)
+			{
+				socklen_t addr_len = sizeof(servaddr);
+				int client = accept(sockfd, (struct sockaddr *)&servaddr, &addr_len);
+				if (client >= 0)
+				{
+					add_client(client);
+					break ;
+				}
+			}
+			else
+			{
+				int readed = recv(fd, rbuf, 1024, 0);
+				if (readed <= 0)
+				{
+					remove_client(fd);
+					break ;
+				}
+				rbuf[readed] = '\0';
+				msg[fd] = str_join(msg[fd], rbuf);
+				deliver(fd);
+			}
+		}
+	}
 	return 0;
 }

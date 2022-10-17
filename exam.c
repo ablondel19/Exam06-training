@@ -4,11 +4,11 @@
 #include <stdlib.h>
 #include <netinet/in.h>
 
-int		clients = 0, fd_max = 0;
-int		idx[65536];
+int		client_id = 0, fd_max = 0;
+int		index_fds[65536];
 char	*msg[65536];
 char	rbuf[1025], wbuf[42];
-fd_set	rfds, wfds, fds;
+fd_set	rfds, wfds, cfds;
 
 int extract_message(char **buf, char **msg)
 {
@@ -62,13 +62,15 @@ void	fatal(void)
 	write(2, "Fatal error\n", 12);
 	exit(1);
 }
-
-void	notify(int from, char *s)
+/*
+ *	Notify all clients with msg except the emitter
+ * */
+void	notify(int emitter, char *msg)
 {
 	for (int fd = 0; fd <= fd_max; fd++)
 	{
-		if (FD_ISSET(fd, &wfds) && fd != from)
-			send(fd, s, strlen(s), 0);
+		if (FD_ISSET(fd, &wfds) && fd != emitter)
+			send(fd, msg, strlen(msg), 0);
 	}
 }
 
@@ -79,7 +81,7 @@ void	deliver(int fd)
 
 	while (extract_message(&(msg[fd]), &s))
 	{
-		sprintf(wbuf, "client %d: ", idx[fd]);
+		sprintf(wbuf, "client %d: ", index_fds[fd]);
 		notify(fd, wbuf);
 		notify(fd, s);
 		free(s);
@@ -90,20 +92,20 @@ void	deliver(int fd)
 void	add_client(int fd)
 {
 	fd_max = fd > fd_max ? fd : fd_max;
-	idx[fd] = clients++;
+	index_fds[fd] = client_id++;
 	msg[fd] = NULL;
-	FD_SET(fd, &fds);
-	sprintf(wbuf, "server: client %d just arrived\n", idx[fd]);
+	FD_SET(fd, &cfds);
+	sprintf(wbuf, "server: client %d just arrived\n", index_fds[fd]);
 	notify(fd, wbuf);
 }
 
 void	remove_client(int fd)
 {
-	sprintf(wbuf, "server: client %d just left\n", idx[fd]);
+	sprintf(wbuf, "server: client %d just left\n", index_fds[fd]);
 	notify(fd, wbuf);
 	free(msg[fd]);
 	msg[fd] = NULL;
-	FD_CLR(fd, &fds);
+	FD_CLR(fd, &cfds);
 	close(fd);
 }
 
@@ -112,7 +114,7 @@ int		create_socket(void)
 	fd_max = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd_max < 0)
 		fatal();
-	FD_SET(fd_max, &fds);
+	FD_SET(fd_max, &cfds);
 	return (fd_max);
 }
 
@@ -123,7 +125,7 @@ int		main(int ac, char **av)
 		write(2, "Wrong number of arguments\n", 26);
 		exit(1);
 	}
-	FD_ZERO(&fds);
+	FD_ZERO(&cfds);
 	int					sockfd = create_socket();
 	struct sockaddr_in	servaddr;
 	bzero(&servaddr, sizeof(servaddr));
@@ -137,7 +139,7 @@ int		main(int ac, char **av)
 		fatal();
 	while (42)
 	{
-		rfds = wfds = fds;
+		rfds = wfds = cfds;
 		if (select(fd_max + 1, &rfds, &wfds, NULL, NULL) < 0)
 			fatal();
 		for (int fd = 0; fd <= fd_max; fd++)
